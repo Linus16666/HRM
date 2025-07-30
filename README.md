@@ -105,6 +105,8 @@ python dataset/build_sudoku_dataset.py --output-dir data/sudoku-extreme-1k-aug-1
 
 # Maze
 python dataset/build_maze_dataset.py  # 1000 examples
+# Multiplication
+python dataset/build_mult_digit_mul_dataset.py  # Random multi-digit multiplication
 ```
 
 ### Dataset Visualization
@@ -149,6 +151,14 @@ OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 pretrain.py data_path=data/maze-30
 ```
 
 *Runtime:* ~1 hour
+
+Multiplication:
+
+```bash
+OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 pretrain.py data_path=data/mult-digit-mul
+```
+
+*Runtime:* varies with dataset size
 
 ### Full Sudoku-Hard
 
