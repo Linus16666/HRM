@@ -106,8 +106,13 @@ python dataset/build_sudoku_dataset.py --output-dir data/sudoku-extreme-1k-aug-1
 # Maze
 python dataset/build_maze_dataset.py  # 1000 examples
 # Multiplication
-python dataset/build_mult_digit_mul_dataset.py  # Random multi-digit multiplication
+python dataset/build_mult_digit_mul_dataset.py  # Random multi-digit multiplication. Prints a few sample puzzles
 ```
+
+Each dataset folder contains a `dataset.json` describing the dataset in
+`PuzzleDatasetMetadata` format. This JSON stores settings such as vocabulary
+size, sequence length and grouping information so HRM's data loader can read the
+arrays correctly.
 
 ### Dataset Visualization
 

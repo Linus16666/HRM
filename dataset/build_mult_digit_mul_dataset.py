@@ -17,6 +17,7 @@ class DataProcessConfig(BaseModel):
     num_train: int = 10000
     num_test: int = 1000
     max_digits: int = 3
+    print_samples: int = 3
 
 
 def number_to_row(number: int, width: int) -> np.ndarray:
@@ -40,7 +41,7 @@ def generate_dataset(split: str, num_examples: int, cfg: DataProcessConfig):
     results["puzzle_indices"].append(0)
     results["group_indices"].append(0)
 
-    for _ in tqdm(range(num_examples)):
+    for i in tqdm(range(num_examples)):
         # Generate a new multiplication example
         # Randomly choose digit lengths for the two operands
         digits_a = rng.integers(1, cfg.max_digits + 1)
@@ -63,6 +64,17 @@ def generate_dataset(split: str, num_examples: int, cfg: DataProcessConfig):
 
         results["inputs"].append(inp)
         results["labels"].append(out)
+
+        if i < cfg.print_samples:
+            print(f"[{split}] Example {i + 1}: {a} x {b} = {product}")
+            print("Input:")
+            for row in inp:
+                print(" ".join(str(int(d)) for d in row))
+            print("Output:")
+            for row in out:
+                print(" ".join(str(int(d)) for d in row))
+            print()
+
         example_id += 1
         puzzle_id += 1
 
