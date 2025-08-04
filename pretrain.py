@@ -330,6 +330,22 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
                 return reduced_metrics
 
 
+def log_parameter_pca(train_state: TrainState, step: int):
+    if wandb.run is None:
+        return
+
+    params = torch.nn.utils.parameters_to_vector(train_state.model.parameters()).detach().cpu()
+    n = (params.shape[0] // 2) * 2
+    if n < 4:
+        return
+
+    params_matrix = params[:n].view(-1, 2)
+    _, _, v = torch.pca_lowrank(params_matrix, q=2)
+    pca_coords = params_matrix @ v[:, :2]
+    table = wandb.Table(data=pca_coords.numpy(), columns=["PC1", "PC2"])
+    wandb.log({"param_pca": wandb.plot.scatter(table, "PC1", "PC2", title="Parameter PCA")}, step=step)
+
+
 def save_code_and_config(config: PretrainConfig):
     if config.checkpoint_path is None or wandb.run is None:
         return
@@ -438,6 +454,8 @@ def launch(hydra_config: DictConfig):
 
         if RANK == 0 and metrics is not None:
             wandb.log(metrics, step=train_state.step)
+            if _iter_id == total_iters - 1:
+                log_parameter_pca(train_state, train_state.step)
             
         ############ Checkpointing
         if RANK == 0 and (config.checkpoint_every_eval or (_iter_id == total_iters - 1)):
