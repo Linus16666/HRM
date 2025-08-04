@@ -6,9 +6,14 @@ import torch.nn.functional as F
 
 try:
     from flash_attn_interface import flash_attn_func  # type: ignore[import]
-except ImportError:
-    # Fallback to FlashAttention 2
-    from flash_attn import flash_attn_func  # type: ignore[import]
+except Exception:
+    try:
+        # FlashAttention 2
+        from flash_attn import flash_attn_func  # type: ignore[import]
+    except Exception:
+        # Final fallback using PyTorch attention
+        def flash_attn_func(q, k, v, causal=False):
+            return F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=causal)
 
 from models.common import trunc_normal_init_
 
