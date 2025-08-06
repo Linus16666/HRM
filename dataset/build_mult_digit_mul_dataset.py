@@ -14,8 +14,8 @@ cli = ArgParser()
 class DataProcessConfig(BaseModel):
     """Configuration options for dataset generation."""
     output_dir: str = "data/mult-digit-mul"
-    num_train: int = 10000
-    num_test: int = 1000
+    num_train: int = 1000
+    num_test: int = 250
     max_digits: int = 3
     print_samples: int = 3
 
