@@ -275,6 +275,7 @@ def validate(config: PretrainConfig, train_state: TrainState, val_loader: torch.
         metric_global_batch_size = [0 for _ in range(len(set_ids))]
 
         last_hidden = None
+        last_tokens = None
         carry = None
         for set_name, batch, global_batch_size in val_loader:
             # To device
@@ -284,15 +285,21 @@ def validate(config: PretrainConfig, train_state: TrainState, val_loader: torch.
 
             # Forward
             while True:
-                carry, _, metrics, preds, all_finish = train_state.model(carry=carry, batch=batch, return_keys=config.eval_save_outputs)
+                carry, _, metrics, preds, all_finish = train_state.model(
+                    carry=carry,
+                    batch=batch,
+                    return_keys=config.eval_save_outputs + ["hidden_states_high", "hidden_states_low"],
+                    return_hidden_states=True,
+                )
 
                 if all_finish:
                     break
 
             last_hidden = (
-                carry.inner_carry.z_H[-1].detach().cpu(),
-                carry.inner_carry.z_L[-1].detach().cpu(),
+                preds["hidden_states_high"].cpu(),
+                preds["hidden_states_low"].cpu(),
             )
+            last_tokens = batch["inputs"].cpu()
 
             for collection in (batch, preds):
                 for k, v in collection.items():
@@ -334,9 +341,9 @@ def validate(config: PretrainConfig, train_state: TrainState, val_loader: torch.
                     count = metrics.pop("count")
                     reduced_metrics[set_name] = {k: v / count for k, v in metrics.items()}
 
-                return reduced_metrics, last_hidden
+                return reduced_metrics, last_hidden, last_tokens
 
-        return None, last_hidden
+        return None, last_hidden, last_tokens
 
 
 def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch.utils.data.DataLoader, eval_metadata: PuzzleDatasetMetadata, rank: int, world_size: int):
@@ -420,27 +427,40 @@ def decode_tokens(tokens: torch.Tensor) -> str:
     return " ".join("." if v < 0 else str(v) for v in values)
 
 
-def log_hidden_state_pca(hidden_states, step: int):
-    if wandb.run is None or hidden_states is None:
+def log_hidden_state_pca(hidden_states, tokens, step: int):
+    """Log PCA plots of hidden states for each layer of high/low modules.
+
+    ``hidden_states`` is a tuple of tensors with shape
+    ``(num_layers, batch, seq_len + puzzle_emb_len, hidden_size)`` for the high
+    and low modules respectively. ``tokens`` should be the input token ids with
+    shape ``(batch, seq_len)`` and are used for colouring points so identical
+    token values share the same colour across sequences.
+    """
+
+    if wandb.run is None or hidden_states is None or tokens is None:
         return
 
     z_H, z_L = hidden_states
+    seq_len = tokens.shape[1]
+    token_colors = tokens.view(-1).cpu().numpy()
+
     for name, z in zip(["high", "low"], [z_H, z_L]):
-        hs = z.to(torch.float32)
-        hs = hs.view(-1, hs.shape[-1])
-        if hs.shape[0] < 2 or hs.shape[1] < 2:
-            continue
-        _, _, v = torch.pca_lowrank(hs, q=2)
-        coords = (hs @ v[:, :2]).cpu().numpy()
-        colors = torch.arange(coords.shape[0]).cpu().numpy()
-        fig, ax = plt.subplots()
-        sc = ax.scatter(coords[:, 0], coords[:, 1], c=colors, cmap="viridis")
-        ax.set_xlabel("PC1")
-        ax.set_ylabel("PC2")
-        ax.set_title(f"{name.capitalize()} Level Hidden State PCA")
-        plt.colorbar(sc, ax=ax, label="Token Index")
-        wandb.log({f"hidden_state_pca_{name}": wandb.Image(fig)}, step=step)
-        plt.close(fig)
+        # z: [layers, batch, seq_len + puzzle_emb_len, hidden]
+        for layer_idx in range(z.shape[0]):
+            hs = z[layer_idx, :, -seq_len:, :].to(torch.float32)
+            hs = hs.reshape(-1, hs.shape[-1])
+            if hs.shape[0] < 2 or hs.shape[1] < 2:
+                continue
+            _, _, v = torch.pca_lowrank(hs, q=2)
+            coords = (hs @ v[:, :2]).cpu().numpy()
+            fig, ax = plt.subplots()
+            sc = ax.scatter(coords[:, 0], coords[:, 1], c=token_colors, cmap="tab10")
+            ax.set_xlabel("PC1")
+            ax.set_ylabel("PC2")
+            ax.set_title(f"{name.capitalize()} Layer {layer_idx + 1} Hidden State PCA")
+            plt.colorbar(sc, ax=ax, label="Token Value")
+            wandb.log({f"hidden_state_pca_{name}_layer_{layer_idx + 1}": wandb.Image(fig)}, step=step)
+            plt.close(fig)
 
 
 def save_code_and_config(config: PretrainConfig):
@@ -547,12 +567,12 @@ def launch(hydra_config: DictConfig):
 
         ############ Validation
         train_state.model.eval()
-        metrics, last_hidden = validate(config, train_state, val_loader, val_metadata, rank=RANK, world_size=WORLD_SIZE)
+        metrics, last_hidden, last_tokens = validate(config, train_state, val_loader, val_metadata, rank=RANK, world_size=WORLD_SIZE)
 
         if RANK == 0 and metrics is not None:
             wandb.log(metrics, step=train_state.step)
             if _iter_id == total_iters - 1:
-                log_hidden_state_pca(last_hidden, train_state.step)
+                log_hidden_state_pca(last_hidden, last_tokens, train_state.step)
 
         current_epoch = _iter_id * train_epochs_per_iter
         if RANK == 0 and current_epoch % 100 == 0:
