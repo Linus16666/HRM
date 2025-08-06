@@ -1,0 +1,129 @@
+program: train.py
+method: bayes
+metric:
+  goal: minimize
+  name: "Relative Time (Process)"
+parameters:
+  puzzle_emb_weight_decay:
+    distribution: uniform
+    min: 0.02792910874246618
+    max: 0.3263303060731556
+  checkpoint_every_eval:
+    distribution: categorical
+    values: [true, false]
+  global_batch_size:
+    distribution: int_uniform
+    min: 384
+    max: 3000
+  lr_warmup_steps:
+    distribution: int_uniform
+    min: 686
+    max: 7260
+  checkpoint_path:
+    distribution: categorical
+    values:
+      - "checkpoints/Mult-digit-mul_ACT-torch/HierarchicalReasoningModel_ACTV1_axiomatic-dragon"
+      - "checkpoints/Mult-digit-mul_ACT-torch/HierarchicalReasoningModel_ACTV1_encouraging-beaver"
+      - "checkpoints/Mult-digit-mul_ACT-torch/HierarchicalReasoningModel_ACTV1_fragrant-iguana"
+      - "checkpoints/Mult-digit-mul_ACT-torch/HierarchicalReasoningModel_ACTV1_celadon-centipede"
+      - "checkpoints/Mult-digit-mul_ACT-torch/HierarchicalReasoningModel_ACTV1_attentive-centipede"
+      - "checkpoints/Mult-digit-mul_ACT-torch/HierarchicalReasoningModel_ACTV1_greedy-dingo"
+  puzzle_emb_lr:
+    distribution: uniform
+    min: 0.0031378315852733344
+    max: 0.02996389629610439
+  eval_interval:
+    distribution: int_uniform
+    min: 3248
+    max: 34022
+  weight_decay:
+    distribution: uniform
+    min: 0.04645824716571708
+    max: 0.363442751028824
+  project_name:
+    distribution: categorical
+    values: ["Mult-digit-mul_ACT-torch"]
+  lr_min_ratio:
+    distribution: int_uniform
+    min: 1
+    max: 4
+  data_path:
+    distribution: categorical
+    values: ["data/mult-digit-mul"]
+  run_name:
+    distribution: categorical
+    values:
+      - "HierarchicalReasoningModel_ACTV1_axiomatic-dragon"
+      - "HierarchicalReasoningModel_ACTV1_encouraging-beaver"
+      - "HierarchicalReasoningModel_ACTV1_fragrant-iguana"
+      - "HierarchicalReasoningModel_ACTV1_celadon-centipede"
+      - "HierarchicalReasoningModel_ACTV1_attentive-centipede"
+      - "HierarchicalReasoningModel_ACTV1_greedy-dingo"
+  epochs:
+    distribution: int_uniform
+    min: 50000
+    max: 410010
+  beta2:
+    distribution: uniform
+    min: 0.304924593355824
+    max: 0.999
+  beta1:
+    distribution: uniform
+    min: 0.24348662540860017
+    max: 0.999
+  arch.halt_exploration_prob:
+    distribution: uniform
+    min: 0.031925394607659835
+    max: 0.28325905705047616
+  arch.puzzle_emb_ndim:
+    distribution: int_uniform
+    min: 256
+    max: 1862
+  arch.halt_max_steps:
+    distribution: int_uniform
+    min: 6
+    max: 62
+  arch.pos_encodings:
+    distribution: categorical
+    values: ["rope"]
+  arch.hidden_size:
+    distribution: int_uniform
+    min: 256
+    max: 1882
+  arch.num_heads:
+    distribution: int_uniform
+    min: 4
+    max: 32
+  arch.expansion:
+    distribution: int_uniform
+    min: 2
+    max: 10
+  arch.L_layers:
+    distribution: int_uniform
+    min: 1
+    max: 8
+  arch.L_cycles:
+    distribution: int_uniform
+    min: 1
+    max: 6
+  arch.H_layers:
+    distribution: int_uniform
+    min: 2
+    max: 14
+  arch.H_cycles:
+    distribution: int_uniform
+    min: 1
+    max: 8
+  arch.name:
+    distribution: categorical
+    values: ["hrm.hrm_act_v1@HierarchicalReasoningModel_ACTV1"]
+  arch.loss.loss_type:
+    distribution: categorical
+    values: ["stablemax_cross_entropy"]
+  arch.loss.name:
+    distribution: categorical
+    values: ["losses@ACTLossHead"]
+  lr:
+    distribution: uniform
+    min: 0.00004850681336194322
+    max: 0.00026390712821670116
