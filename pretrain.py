@@ -428,39 +428,53 @@ def decode_tokens(tokens: torch.Tensor) -> str:
 
 
 def log_hidden_state_pca(hidden_states, tokens, step: int):
-    """Log PCA plots of hidden states for each layer of high/low modules.
+    """PCA of hidden states where color encodes the layer index.
 
-    ``hidden_states`` is a tuple of tensors with shape
-    ``(num_layers, batch, seq_len + puzzle_emb_len, hidden_size)`` for the high
-    and low modules respectively. ``tokens`` should be the input token ids with
-    shape ``(batch, seq_len)`` and are used for colouring points so identical
-    token values share the same colour across sequences.
+    hidden_states: (z_H, z_L) each shaped
+      (num_layers, batch, seq_len + puzzle_emb_len, hidden_size)
+    tokens: (batch, seq_len) — only used to know seq_len.
     """
-
     if wandb.run is None or hidden_states is None or tokens is None:
         return
 
     z_H, z_L = hidden_states
     seq_len = tokens.shape[1]
-    token_colors = tokens.view(-1).cpu().numpy()
 
     for name, z in zip(["high", "low"], [z_H, z_L]):
         # z: [layers, batch, seq_len + puzzle_emb_len, hidden]
-        for layer_idx in range(z.shape[0]):
-            hs = z[layer_idx, :, -seq_len:, :].to(torch.float32)
-            hs = hs.reshape(-1, hs.shape[-1])
-            if hs.shape[0] < 2 or hs.shape[1] < 2:
-                continue
-            _, _, v = torch.pca_lowrank(hs, q=2)
-            coords = (hs @ v[:, :2]).cpu().numpy()
-            fig, ax = plt.subplots()
-            sc = ax.scatter(coords[:, 0], coords[:, 1], c=token_colors, cmap="tab10")
-            ax.set_xlabel("PC1")
-            ax.set_ylabel("PC2")
-            ax.set_title(f"{name.capitalize()} Layer {layer_idx + 1} Hidden State PCA")
-            plt.colorbar(sc, ax=ax, label="Token Value")
-            wandb.log({f"hidden_state_pca_{name}_layer_{layer_idx + 1}": wandb.Image(fig)}, step=step)
-            plt.close(fig)
+        num_layers, batch, total_len, hidden = z.shape
+
+        # Collect hidden states from the last seq_len positions for every layer
+        # and track the layer id for each point
+        hs_per_layer = []
+        layer_ids = []
+        for layer_idx in range(num_layers):
+            hs = z[layer_idx, :, -seq_len:, :].to(torch.float32)  # [B, S, H]
+            hs = hs.reshape(-1, hidden)                           # [B*S, H]
+            hs_per_layer.append(hs)
+            layer_ids.append(torch.full((hs.shape[0],), layer_idx, dtype=torch.int64))
+
+        hs_all = torch.cat(hs_per_layer, dim=0)                   # [N, H]
+        layer_ids_all = torch.cat(layer_ids, dim=0).cpu().numpy() # [N]
+
+        # Need at least 2 dims/points for PCA
+        if hs_all.shape[0] < 2 or hs_all.shape[1] < 2:
+            continue
+
+        # PCA -> first 2 PCs
+        _, _, v = torch.pca_lowrank(hs_all, q=2)
+        coords = (hs_all @ v[:, :2]).cpu().numpy()
+
+        # Scatter colored by layer index (single plot per module)
+        fig, ax = plt.subplots()
+        sc = ax.scatter(coords[:, 0], coords[:, 1], c=layer_ids_all, cmap="viridis", s=8)
+        ax.set_xlabel("PC1")
+        ax.set_ylabel("PC2")
+        ax.set_title(f"{name.capitalize()} module: hidden state PCA (colored by layer)")
+        cbar = plt.colorbar(sc, ax=ax)
+        cbar.set_label("Layer index")
+        wandb.log({f"hidden_state_pca_{name}": wandb.Image(fig)}, step=step)
+        plt.close(fig)
 
 
 def save_code_and_config(config: PretrainConfig):
