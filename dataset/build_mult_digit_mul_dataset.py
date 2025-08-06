@@ -47,9 +47,20 @@ def generate_dataset(split: str, num_examples: int, cfg: DataProcessConfig):
         digits_a = rng.integers(1, cfg.max_digits + 1)
         digits_b = rng.integers(1, cfg.max_digits + 1)
 
-        # Sample numbers of the chosen length (no leading zeros)
-        a = rng.integers(10 ** (digits_a - 1), 10 ** digits_a)
-        b = rng.integers(10 ** (digits_b - 1), 10 ** digits_b)
+        # Sample numbers of the chosen length (no leading zeros).  ``np.random``
+        # is limited to 64-bit integers, so we build the numbers digit-by-digit to
+        # avoid overflow when ``cfg.max_digits`` is large.
+        def sample_number(num_digits: int) -> int:
+            first = rng.integers(1, 10)
+            if num_digits == 1:
+                digits = [first]
+            else:
+                rest = rng.integers(0, 10, size=num_digits - 1)
+                digits = np.concatenate([[first], rest])
+            return int("".join(str(int(d)) for d in digits))
+
+        a = sample_number(digits_a)
+        b = sample_number(digits_b)
 
         product = a * b
 
