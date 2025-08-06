@@ -17,6 +17,7 @@ import hydra
 import pydantic
 from omegaconf import DictConfig
 from adam_atan2 import AdamATan2
+import matplotlib.pyplot as plt
 
 from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
 from utils.functions import load_model_class, get_model_source_path
@@ -263,18 +264,19 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             return reduced_metrics
 
 
-def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch.utils.data.DataLoader, eval_metadata: PuzzleDatasetMetadata, rank: int, world_size: int):
+def validate(config: PretrainConfig, train_state: TrainState, val_loader: torch.utils.data.DataLoader, val_metadata: PuzzleDatasetMetadata, rank: int, world_size: int):
     with torch.inference_mode():
-        set_ids = {k: idx for idx, k in enumerate(eval_metadata.sets)}
-        
+        set_ids = {k: idx for idx, k in enumerate(val_metadata.sets)}
+
         all_preds = {}
 
         metric_keys = []
         metric_values = None
         metric_global_batch_size = [0 for _ in range(len(set_ids))]
-        
+
+        last_hidden = None
         carry = None
-        for set_name, batch, global_batch_size in eval_loader:
+        for set_name, batch, global_batch_size in val_loader:
             # To device
             batch = {k: v.cuda() for k, v in batch.items()}
             with torch.device("cuda"):
@@ -283,25 +285,30 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
             # Forward
             while True:
                 carry, _, metrics, preds, all_finish = train_state.model(carry=carry, batch=batch, return_keys=config.eval_save_outputs)
-                
+
                 if all_finish:
                     break
+
+            last_hidden = (
+                carry.inner_carry.z_H[-1].detach().cpu(),
+                carry.inner_carry.z_L[-1].detach().cpu(),
+            )
 
             for collection in (batch, preds):
                 for k, v in collection.items():
                     if k in config.eval_save_outputs:
                         all_preds.setdefault(k, [])
                         all_preds[k].append(v.cpu())  # Move to CPU for saving GPU memory
-                        
+
             del carry, preds, batch, all_finish
 
             # Aggregate
             set_id = set_ids[set_name]
-            
+
             if metric_values is None:
                 metric_keys = list(sorted(metrics.keys()))  # Sort keys to guarantee all processes use the same order.
                 metric_values = torch.zeros((len(set_ids), len(metrics.values())), dtype=torch.float32, device="cuda")
-                
+
             metric_values[set_id] += torch.stack([metrics[k] for k in metric_keys])
             metric_global_batch_size[set_id] += global_batch_size
 
@@ -316,12 +323,81 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
         if metric_values is not None:
             if world_size > 1:
                 dist.reduce(metric_values, dst=0)
-            
+
             if rank == 0:
                 reduced_metrics = metric_values.cpu().numpy()
                 reduced_metrics = {set_name: {metric_name: reduced_metrics[set_id, metric_id] for metric_id, metric_name in enumerate(metric_keys)}
                                    for set_id, set_name in enumerate(set_ids)}
-                
+
+                # Postprocess
+                for set_name, metrics in reduced_metrics.items():
+                    count = metrics.pop("count")
+                    reduced_metrics[set_name] = {k: v / count for k, v in metrics.items()}
+
+                return reduced_metrics, last_hidden
+
+        return None, last_hidden
+
+
+def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch.utils.data.DataLoader, eval_metadata: PuzzleDatasetMetadata, rank: int, world_size: int):
+    with torch.inference_mode():
+        set_ids = {k: idx for idx, k in enumerate(eval_metadata.sets)}
+
+        all_preds = {}
+
+        metric_keys = []
+        metric_values = None
+        metric_global_batch_size = [0 for _ in range(len(set_ids))]
+
+        carry = None
+        for set_name, batch, global_batch_size in eval_loader:
+            # To device
+            batch = {k: v.cuda() for k, v in batch.items()}
+            with torch.device("cuda"):
+                carry = train_state.model.initial_carry(batch)  # type: ignore
+
+            # Forward
+            while True:
+                carry, _, metrics, preds, all_finish = train_state.model(carry=carry, batch=batch, return_keys=config.eval_save_outputs)
+
+                if all_finish:
+                    break
+
+            for collection in (batch, preds):
+                for k, v in collection.items():
+                    if k in config.eval_save_outputs:
+                        all_preds.setdefault(k, [])
+                        all_preds[k].append(v.cpu())  # Move to CPU for saving GPU memory
+
+            del carry, preds, batch, all_finish
+
+            # Aggregate
+            set_id = set_ids[set_name]
+
+            if metric_values is None:
+                metric_keys = list(sorted(metrics.keys()))  # Sort keys to guarantee all processes use the same order.
+                metric_values = torch.zeros((len(set_ids), len(metrics.values())), dtype=torch.float32, device="cuda")
+
+            metric_values[set_id] += torch.stack([metrics[k] for k in metric_keys])
+            metric_global_batch_size[set_id] += global_batch_size
+
+        if len(all_preds) and config.checkpoint_path is not None:
+            all_preds = {k: torch.cat(v, dim=0) for k, v in all_preds.items()}
+
+            os.makedirs(config.checkpoint_path, exist_ok=True)
+            torch.save(all_preds, os.path.join(config.checkpoint_path, f"step_{train_state.step}_all_preds.{rank}"))
+
+        # Logging
+        # Reduce to rank 0
+        if metric_values is not None:
+            if world_size > 1:
+                dist.reduce(metric_values, dst=0)
+
+            if rank == 0:
+                reduced_metrics = metric_values.cpu().numpy()
+                reduced_metrics = {set_name: {metric_name: reduced_metrics[set_id, metric_id] for metric_id, metric_name in enumerate(metric_keys)}
+                                   for set_id, set_name in enumerate(set_ids)}
+
                 # Postprocess
                 for set_name, metrics in reduced_metrics.items():
                     count = metrics.pop("count")
@@ -329,21 +405,30 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
 
                 return reduced_metrics
 
+        return None
 
-def log_parameter_pca(train_state: TrainState, step: int):
-    if wandb.run is None:
+
+def log_hidden_state_pca(hidden_states, step: int):
+    if wandb.run is None or hidden_states is None:
         return
 
-    params = torch.nn.utils.parameters_to_vector(train_state.model.parameters()).detach().cpu()
-    n = (params.shape[0] // 2) * 2
-    if n < 4:
-        return
-
-    params_matrix = params[:n].view(-1, 2)
-    _, _, v = torch.pca_lowrank(params_matrix, q=2)
-    pca_coords = params_matrix @ v[:, :2]
-    table = wandb.Table(data=pca_coords.numpy(), columns=["PC1", "PC2"])
-    wandb.log({"param_pca": wandb.plot.scatter(table, "PC1", "PC2", title="Parameter PCA")}, step=step)
+    z_H, z_L = hidden_states
+    for name, z in zip(["high", "low"], [z_H, z_L]):
+        hs = z.to(torch.float32)
+        hs = hs.view(-1, hs.shape[-1])
+        if hs.shape[0] < 2 or hs.shape[1] < 2:
+            continue
+        _, _, v = torch.pca_lowrank(hs, q=2)
+        coords = (hs @ v[:, :2]).cpu().numpy()
+        colors = torch.arange(coords.shape[0]).cpu().numpy()
+        fig, ax = plt.subplots()
+        sc = ax.scatter(coords[:, 0], coords[:, 1], c=colors, cmap="viridis")
+        ax.set_xlabel("PC1")
+        ax.set_ylabel("PC2")
+        ax.set_title(f"{name.capitalize()} Level Hidden State PCA")
+        plt.colorbar(sc, ax=ax, label="Token Index")
+        wandb.log({f"hidden_state_pca_{name}": wandb.Image(fig)}, step=step)
+        plt.close(fig)
 
 
 def save_code_and_config(config: PretrainConfig):
@@ -421,7 +506,7 @@ def launch(hydra_config: DictConfig):
     assert config.epochs % train_epochs_per_iter == 0, "Eval interval must be a divisor of total epochs."
 
     train_loader, train_metadata = create_dataloader(config, "train", test_set_mode=False, epochs_per_iter=train_epochs_per_iter, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE)
-    eval_loader,  eval_metadata  = create_dataloader(config, "test", test_set_mode=True, epochs_per_iter=1, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE)
+    val_loader,  val_metadata  = create_dataloader(config, "test", test_set_mode=True, epochs_per_iter=1, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE)
 
     # Train state
     train_state = init_train_state(config, train_metadata, world_size=WORLD_SIZE)
@@ -448,14 +533,14 @@ def launch(hydra_config: DictConfig):
                 wandb.log(metrics, step=train_state.step)
                 progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
 
-        ############ Evaluation
+        ############ Validation
         train_state.model.eval()
-        metrics = evaluate(config, train_state, eval_loader, eval_metadata, rank=RANK, world_size=WORLD_SIZE)
+        metrics, last_hidden = validate(config, train_state, val_loader, val_metadata, rank=RANK, world_size=WORLD_SIZE)
 
         if RANK == 0 and metrics is not None:
             wandb.log(metrics, step=train_state.step)
             if _iter_id == total_iters - 1:
-                log_parameter_pca(train_state, train_state.step)
+                log_hidden_state_pca(last_hidden, train_state.step)
             
         ############ Checkpointing
         if RANK == 0 and (config.checkpoint_every_eval or (_iter_id == total_iters - 1)):
