@@ -408,6 +408,18 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
         return None
 
 
+def decode_tokens(tokens: torch.Tensor) -> str:
+    tokens_list = tokens.tolist()
+    values = [(t - 1) if t > 0 else -1 for t in tokens_list]
+    grid_size = int(len(values) ** 0.5)
+    if grid_size * grid_size == len(values):
+        return "\n".join(
+            " ".join("." if v < 0 else str(v) for v in values[r * grid_size:(r + 1) * grid_size])
+            for r in range(grid_size)
+        )
+    return " ".join("." if v < 0 else str(v) for v in values)
+
+
 def log_hidden_state_pca(hidden_states, step: int):
     if wandb.run is None or hidden_states is None:
         return
@@ -541,6 +553,22 @@ def launch(hydra_config: DictConfig):
             wandb.log(metrics, step=train_state.step)
             if _iter_id == total_iters - 1:
                 log_hidden_state_pca(last_hidden, train_state.step)
+
+        current_epoch = _iter_id * train_epochs_per_iter
+        if RANK == 0 and current_epoch % 100 == 0:
+            example_set, example_batch, _ = next(iter(val_loader))
+            example_gpu = {k: v.cuda() for k, v in example_batch.items()}
+            with torch.inference_mode(), torch.device("cuda"):
+                sample_carry = train_state.model.initial_carry(example_gpu)  # type: ignore
+                while True:
+                    sample_carry, _, _, sample_preds, all_finish = train_state.model(
+                        carry=sample_carry, batch=example_gpu, return_keys=["logits"])
+                    if all_finish:
+                        break
+            pred_tokens = sample_preds["logits"].argmax(dim=-1).cpu()
+            print("Input:\n" + decode_tokens(example_batch["inputs"][0]))
+            print("Correct output:\n" + decode_tokens(example_batch["labels"][0]))
+            print("Model output:\n" + decode_tokens(pred_tokens[0]))
             
         ############ Checkpointing
         if RANK == 0 and (config.checkpoint_every_eval or (_iter_id == total_iters - 1)):
