@@ -3,6 +3,7 @@ import json
 
 import numpy as np
 import pydantic
+from typing import Optional
 
 import torch
 from torch.utils.data import IterableDataset, get_worker_info
@@ -49,6 +50,8 @@ class PuzzleDatasetConfig(pydantic.BaseModel):
     rank: int
     num_replicas: int
 
+    max_digits: Optional[int] = None
+
 
 class PuzzleDataset(IterableDataset):
     def __init__(self, config: PuzzleDatasetConfig, split: str = "train"):
@@ -64,6 +67,7 @@ class PuzzleDataset(IterableDataset):
         # State
         self._data = None
         self._iters = 0
+        self._allowed_indices = {}
 
     def _load_metadata(self) -> PuzzleDatasetMetadata:
         with open(os.path.join(self.config.dataset_path, self.split, "dataset.json"), "r") as f:
@@ -76,6 +80,7 @@ class PuzzleDataset(IterableDataset):
         field_mmap_modes = {
             "inputs": "r",
             "labels": "r",
+            "max_digits": "r",
 
             # Keep indices in memory
             "puzzle_identifiers": None,
@@ -91,6 +96,13 @@ class PuzzleDataset(IterableDataset):
                 field_name: np.load(os.path.join(self.config.dataset_path, self.split, f"{set_name}__{field_name}.npy"), mmap_mode=mmap_mode)
                 for field_name, mmap_mode in field_mmap_modes.items()
             }
+
+            # Determine which puzzle IDs are allowed under max_digits
+            if self.config.max_digits is None:
+                allowed = np.arange(self._data[set_name]["max_digits"].shape[0])
+            else:
+                allowed = np.where(self._data[set_name]["max_digits"] <= self.config.max_digits)[0]
+            self._allowed_indices[set_name] = allowed
 
     def _collate_batch(self, batch):
         # Convert dtype
@@ -117,35 +129,24 @@ class PuzzleDataset(IterableDataset):
     
     def _iter_test(self):
         for set_name, dataset in self._data.items():  # type: ignore
-            total_examples = len(dataset["inputs"])
+            allowed = self._allowed_indices[set_name]
+            total_examples = allowed.size
 
-            # Load examples one by one
             start_index = 0
             while start_index < total_examples:
-                # Compute indices
                 end_index = min(total_examples, start_index + self.config.global_batch_size)
-                
-                local_start = start_index + self.config.rank * self.local_batch_size
-                local_end   = min(start_index + (self.config.rank + 1) * self.local_batch_size, end_index)
-                
-                # Get batch of examples, and also puzzle IDs
-                puzzle_indices = []
-                puzzle_index = np.searchsorted(dataset["puzzle_indices"], local_start, side="right") - 1
-                for i in range(local_start, local_end):
-                    while puzzle_index + 1 < len(dataset["puzzle_indices"]) and i >= dataset["puzzle_indices"][puzzle_index + 1]:
-                        puzzle_index += 1
 
-                    puzzle_indices.append(puzzle_index)
-                
+                selected = allowed[start_index:end_index]
+                local_selected = selected[self.config.rank * self.local_batch_size:(self.config.rank + 1) * self.local_batch_size]
+
                 batch = self._collate_batch({
-                    "inputs": dataset["inputs"][local_start: local_end],
-                    "labels": dataset["labels"][local_start: local_end],
-                    "puzzle_identifiers": dataset["puzzle_identifiers"][puzzle_indices]
+                    "inputs": dataset["inputs"][local_selected],
+                    "labels": dataset["labels"][local_selected],
+                    "puzzle_identifiers": dataset["puzzle_identifiers"][local_selected]
                 })
 
                 yield set_name, batch, end_index - start_index
-                
-                # Advance to next batch
+
                 start_index += self.config.global_batch_size
 
     def _iter_train(self):
@@ -153,10 +154,10 @@ class PuzzleDataset(IterableDataset):
             # Increase epoch count
             self._iters += 1
 
-            # Randomly shuffle groups
+            # Randomly shuffle groups respecting max_digits filter
             rng = np.random.Generator(np.random.Philox(seed=self.config.seed + self._iters))
-
-            group_order = np.concatenate([rng.permutation(dataset["group_indices"].size - 1) for _i in range(self.config.epochs_per_iter)])
+            allowed = self._allowed_indices[set_name]
+            group_order = np.concatenate([rng.permutation(allowed) for _ in range(self.config.epochs_per_iter)])
             start_index = 0
             
             while start_index < group_order.size:

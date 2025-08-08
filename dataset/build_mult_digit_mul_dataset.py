@@ -21,9 +21,16 @@ class DataProcessConfig(BaseModel):
 
 
 def number_to_row(number: int, width: int) -> np.ndarray:
-    """Return a row of digits for ``number`` padded to ``width`` with zeros."""
-    digits = str(number).rjust(width, "0")
-    return np.frombuffer(digits.encode(), dtype=np.uint8) - ord("0")
+    """Return a row of digits for ``number`` padded to ``width``.
+
+    Left padding is filled with ``-1`` so that it can be treated as PAD when the
+    dataset is serialized.  Actual digits remain in the range ``0-9``.
+    """
+    digits = str(number)
+    pad = width - len(digits)
+    row = np.full(width, -1, dtype=np.int8)
+    row[pad:] = np.frombuffer(digits.encode(), dtype=np.uint8) - ord("0")
+    return row
 
 
 def generate_dataset(split: str, num_examples: int, cfg: DataProcessConfig):
@@ -33,7 +40,7 @@ def generate_dataset(split: str, num_examples: int, cfg: DataProcessConfig):
     width = cfg.max_digits * 2
 
     # Storage for all examples in this split
-    results = {k: [] for k in ["inputs", "labels", "puzzle_identifiers", "puzzle_indices", "group_indices"]}
+    results = {k: [] for k in ["inputs", "labels", "puzzle_identifiers", "puzzle_indices", "group_indices", "max_digits"]}
     # "puzzle_id" and "example_id" track dataset indexing for HRM's loader
     puzzle_id = 0
     example_id = 0
@@ -70,20 +77,21 @@ def generate_dataset(split: str, num_examples: int, cfg: DataProcessConfig):
         row_c = number_to_row(product, width)
 
         # Third row is blank in the input and filled with the product in labels
-        inp = np.vstack([row_a, row_b, np.zeros_like(row_c)])
+        inp = np.vstack([row_a, row_b, np.full_like(row_c, -1)])
         out = np.vstack([row_a, row_b, row_c])
 
         results["inputs"].append(inp)
         results["labels"].append(out)
+        results["max_digits"].append(max(digits_a, digits_b))
 
         if i < cfg.print_samples:
             print(f"[{split}] Example {i + 1}: {a} x {b} = {product}")
             print("Input:")
             for row in inp:
-                print(" ".join(str(int(d)) for d in row))
+                print(" ".join("." if int(d) == -1 else str(int(d)) for d in row))
             print("Output:")
             for row in out:
-                print(" ".join(str(int(d)) for d in row))
+                print(" ".join("." if int(d) == -1 else str(int(d)) for d in row))
             print()
 
         example_id += 1
@@ -94,11 +102,11 @@ def generate_dataset(split: str, num_examples: int, cfg: DataProcessConfig):
         results["group_indices"].append(puzzle_id)
 
     def _seq_to_numpy(seq):
-        """Flatten list of grids to token IDs (1..10)."""
+        """Flatten list of grids to token IDs where -1 denotes padding."""
         arr = np.concatenate(seq).reshape(len(seq), -1)
-        assert np.all((arr >= 0) & (arr <= 9))
-        # Shift by one so 0 becomes 1 and reserve 0 for padding
-        return arr + 1
+        assert np.all((arr >= -1) & (arr <= 9))
+        # Shift by one so -1 -> 0 (PAD) and digits 0-9 -> 1-10
+        return (arr + 1).astype(np.int8)
 
     results = {
         "inputs": _seq_to_numpy(results["inputs"]),
@@ -106,6 +114,7 @@ def generate_dataset(split: str, num_examples: int, cfg: DataProcessConfig):
         "group_indices": np.array(results["group_indices"], dtype=np.int32),
         "puzzle_indices": np.array(results["puzzle_indices"], dtype=np.int32),
         "puzzle_identifiers": np.array(results["puzzle_identifiers"], dtype=np.int32),
+        "max_digits": np.array(results["max_digits"], dtype=np.int32),
     }
 
     # Metadata describing the dataset for the HRM loader
