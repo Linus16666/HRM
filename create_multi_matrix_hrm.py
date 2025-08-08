@@ -14,9 +14,16 @@ from models.losses import IGNORE_LABEL_ID
 
 
 def number_to_row(number: int, width: int) -> np.ndarray:
-    """Return a row of digits for ``number`` padded to ``width``."""
-    digits = str(number).rjust(width, "0")
-    return np.frombuffer(digits.encode(), dtype=np.uint8) - ord("0")
+    """Return a row of digits for ``number`` padded to ``width``.
+
+    Left padding is filled with ``-1`` so that it can be treated as PAD when
+    tokenized, mirroring the dataset generation utility.
+    """
+    digits = str(number)
+    pad = width - len(digits)
+    row = np.full(width, -1, dtype=np.int64)
+    row[pad:] = np.frombuffer(digits.encode(), dtype=np.uint8) - ord("0")
+    return row
 
 
 def generate_number(digits: int) -> int:
@@ -36,7 +43,7 @@ def build_batch(a: int, b: int, metadata: PuzzleDatasetMetadata, device: torch.d
 
     row_a = number_to_row(a, width)
     row_b = number_to_row(b, width)
-    blank = np.zeros(width, dtype=np.int64)
+    blank = np.full(width, -1, dtype=np.int64)
 
     inp = np.vstack([row_a, row_b, blank]) + 1
     inputs = torch.tensor(inp.reshape(1, -1), dtype=torch.int32, device=device)
@@ -44,7 +51,9 @@ def build_batch(a: int, b: int, metadata: PuzzleDatasetMetadata, device: torch.d
     batch = {
         "inputs": inputs,
         "labels": labels,
-        "puzzle_identifiers": torch.zeros((1,), dtype=torch.int32, device=device),
+        "puzzle_identifiers": torch.full(
+            (1,), metadata.blank_identifier_id, dtype=torch.int32, device=device
+        ),
     }
     return batch, width
 
@@ -56,9 +65,12 @@ def hrm_predict(model: torch.nn.Module, metadata: PuzzleDatasetMetadata, a: int,
         carry, _, _, outputs, all_finish = model(return_keys=["logits"], carry=carry, batch=batch)
         if all_finish:
             break
-    preds = outputs["logits"].argmax(dim=-1).view(3, width).detach().cpu().numpy() - 1
+    preds = (
+        outputs["logits"].argmax(dim=-1).view(3, width).detach().cpu().numpy() - 1
+    )
     digits = preds[2]
-    return int("".join(map(str, digits)).lstrip("0") or "0")
+    digits = digits[digits >= 0]
+    return int("".join(map(str, digits)) or "0")
 
 
 def test_accuracy_for_pair(model, metadata, d1: int, d2: int, n_samples: int, device: torch.device) -> float:
