@@ -9,15 +9,18 @@ import matplotlib.pyplot as plt
 from pretrain import PretrainConfig, init_train_state, create_dataloader
 
 
-def collect_hidden_states(model, dataloader, device):
+def collect_hidden_states(model, dataloader, device, max_tokens=None):
     """Iterate one epoch and collect hidden states for all layers.
 
-    Returns two tensors shaped (num_layers, N, hidden_size) for the high and
-    low level modules respectively, where ``N`` is the total number of
-    token positions collected across the epoch.
+    Returns two tensors shaped (num_layers, ``N``, hidden_size) for the high and
+    low level modules respectively, where ``N`` is the total number of token
+    positions collected across the epoch. To avoid exhausting GPU memory, states
+    are moved to CPU and, if ``max_tokens`` is provided, collection stops once
+    roughly that many token positions have been gathered.
     """
     high_states = []
     low_states = []
+    collected = 0
 
     with torch.no_grad():
         for _set_name, batch, _ in dataloader:
@@ -31,18 +34,24 @@ def collect_hidden_states(model, dataloader, device):
                     return_hidden_states=True,
                     return_keys=["hidden_states_high", "hidden_states_low"],
                 )
-                z_h = outputs["hidden_states_high"].to(torch.float32)
-                z_l = outputs["hidden_states_low"].to(torch.float32)
+                z_h = outputs["hidden_states_high"].to(device="cpu", dtype=torch.float32)
+                z_l = outputs["hidden_states_low"].to(device="cpu", dtype=torch.float32)
                 # Keep only positions corresponding to output tokens
                 z_h = z_h[:, :, -seq_len:, :].reshape(z_h.shape[0], -1, z_h.shape[-1])
                 z_l = z_l[:, :, -seq_len:, :].reshape(z_l.shape[0], -1, z_l.shape[-1])
                 high_states.append(z_h)
                 low_states.append(z_l)
-                if all_finish:
+                collected += z_h.shape[1]
+                if all_finish or (max_tokens and collected >= max_tokens):
                     break
+            if max_tokens and collected >= max_tokens:
+                break
 
     high_states = torch.cat(high_states, dim=1) if high_states else torch.empty(0)
     low_states = torch.cat(low_states, dim=1) if low_states else torch.empty(0)
+    if max_tokens:
+        high_states = high_states[:, :max_tokens]
+        low_states = low_states[:, :max_tokens]
     return high_states, low_states
 
 
@@ -86,13 +95,17 @@ def layer_similarity(states, ax, title):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run one epoch and visualise PCA of hidden states.""")
+        description="Run one epoch and visualise PCA of hidden states."
+    )
     parser.add_argument("checkpoint", help="Path to a model checkpoint")
     parser.add_argument(
         "--output", default="hidden_state_pca.png", help="Output image file"
     )
     parser.add_argument(
-        "--max-points", type=int, default=10000, help="Max points for PCA"
+        "--max-points",
+        type=int,
+        default=10000,
+        help="Max token positions to collect for analysis",
     )
     args = parser.parse_args()
 
@@ -122,7 +135,9 @@ def main():
         model.load_state_dict({k.removeprefix("_orig_mod."): v for k, v in state.items()})
     model.eval()
 
-    high_states, low_states = collect_hidden_states(model, dataloader, device)
+    high_states, low_states = collect_hidden_states(
+        model, dataloader, device, max_tokens=args.max_points
+    )
 
     if high_states.numel() == 0 or low_states.numel() == 0:
         raise RuntimeError("No hidden states were collected. Check dataset and model.")
