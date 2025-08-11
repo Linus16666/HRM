@@ -79,7 +79,9 @@ def hrm_predict(model: torch.nn.Module, metadata: PuzzleDatasetMetadata, a: int,
         outputs["logits"].argmax(dim=-1).squeeze(0).view(3, width).cpu().numpy() - 1
     )
     digits = preds[2]
-    digits = digits[digits != -1]
+    expected_len = len(str(a * b))
+    digits = digits[-expected_len:]
+    digits = [d if d >= 0 else 0 for d in digits]
     return int("".join(map(str, digits)) or "0")
 
 

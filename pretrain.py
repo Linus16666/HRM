@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
 from utils.functions import load_model_class, get_model_source_path
 from models.sparse_embedding import CastedSparseEmbeddingSignSGD_Distributed
+from models.losses import IGNORE_LABEL_ID
 
 
 class LossConfig(pydantic.BaseModel):
@@ -73,7 +74,7 @@ class PretrainConfig(pydantic.BaseModel):
 
     # Curriculum learning
     max_digits_schedule: List[int] = []
-    stage_epochs: int = 1
+    stage_epochs: Optional[int] = None
 
 
 @dataclass
@@ -179,7 +180,7 @@ def cosine_schedule_with_warmup_lr_lambda(
 
 def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, world_size: int):
     # Estimated total training steps
-    total_steps = int(config.epochs * train_metadata.total_groups * train_metadata.mean_puzzle_examples / config.global_batch_size)
+    total_steps = int(config.stage_epochs * train_metadata.total_groups * train_metadata.mean_puzzle_examples / config.global_batch_size)
 
     # Model
     model, optimizers, optimizer_lrs = create_model(config, train_metadata, world_size=world_size)
@@ -221,6 +222,8 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
 
     # To device
     batch = {k: v.cuda() for k, v in batch.items()}
+    width = batch["labels"].shape[1] // 3
+    batch["labels"][:, :2 * width] = IGNORE_LABEL_ID
 
     # Init carry if it is None
     if train_state.carry is None:
@@ -367,6 +370,8 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
         for set_name, batch, global_batch_size in eval_loader:
             # To device
             batch = {k: v.cuda() for k, v in batch.items()}
+            width = batch["labels"].shape[1] // 3
+            batch["labels"][:, :2 * width] = IGNORE_LABEL_ID
             with torch.device("cuda"):
                 carry = train_state.model.initial_carry(batch)  # type: ignore
 
@@ -515,6 +520,9 @@ def load_synced_config(hydra_config: DictConfig, rank: int, world_size: int) -> 
     if rank == 0:
         config = PretrainConfig(**hydra_config)  # type: ignore
 
+        if config.stage_epochs is None:
+            config.stage_epochs = config.epochs
+
         # Naming
         if config.project_name is None:
             config.project_name = f"{os.path.basename(config.data_path).capitalize()} ACT-torch"
@@ -616,9 +624,10 @@ def launch(hydra_config: DictConfig):
                         if all_finish:
                             break
                 pred_tokens = sample_preds["logits"].argmax(dim=-1).cpu()
+                width = example_batch["labels"].shape[1] // 3
                 print("Input:\n" + decode_tokens(example_batch["inputs"][0]))
-                print("Correct output:\n" + decode_tokens(example_batch["labels"][0]))
-                print("Model output:\n" + decode_tokens(pred_tokens[0]))
+                print("Correct output:\n" + decode_tokens(example_batch["labels"][0][2 * width:]))
+                print("Model output:\n" + decode_tokens(pred_tokens[0][2 * width:]))
 
             ############ Checkpointing
             if RANK == 0 and (config.checkpoint_every_eval or (stage_idx == len(curriculum) - 1 and _iter_id == total_iters - 1)):
