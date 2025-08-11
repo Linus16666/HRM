@@ -74,7 +74,7 @@ class PretrainConfig(pydantic.BaseModel):
 
     # Curriculum learning
     max_digits_schedule: List[int] = []
-    stage_epochs: int = 1
+    stage_epochs: Optional[int] = None
 
 
 @dataclass
@@ -180,7 +180,7 @@ def cosine_schedule_with_warmup_lr_lambda(
 
 def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, world_size: int):
     # Estimated total training steps
-    total_steps = int(config.epochs * train_metadata.total_groups * train_metadata.mean_puzzle_examples / config.global_batch_size)
+    total_steps = int(config.stage_epochs * train_metadata.total_groups * train_metadata.mean_puzzle_examples / config.global_batch_size)
 
     # Model
     model, optimizers, optimizer_lrs = create_model(config, train_metadata, world_size=world_size)
@@ -521,6 +521,9 @@ def load_synced_config(hydra_config: DictConfig, rank: int, world_size: int) -> 
     objects = [None]
     if rank == 0:
         config = PretrainConfig(**hydra_config)  # type: ignore
+
+        if config.stage_epochs is None:
+            config.stage_epochs = config.epochs
 
         # Naming
         if config.project_name is None:
