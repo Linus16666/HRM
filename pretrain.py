@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
 from utils.functions import load_model_class, get_model_source_path
 from models.sparse_embedding import CastedSparseEmbeddingSignSGD_Distributed
+from models.losses import IGNORE_LABEL_ID
 
 
 class LossConfig(pydantic.BaseModel):
@@ -221,6 +222,8 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
 
     # To device
     batch = {k: v.cuda() for k, v in batch.items()}
+    width = batch["labels"].shape[1] // 3
+    batch["labels"][:, :2 * width] = IGNORE_LABEL_ID
 
     # Init carry if it is None
     if train_state.carry is None:
@@ -287,6 +290,8 @@ def validate(config: PretrainConfig, train_state: TrainState, val_loader: torch.
         for set_name, batch, global_batch_size in val_loader:
             # To device
             batch = {k: v.cuda() for k, v in batch.items()}
+            width = batch["labels"].shape[1] // 3
+            batch["labels"][:, :2 * width] = IGNORE_LABEL_ID
             with torch.device("cuda"):
                 carry = train_state.model.initial_carry(batch)  # type: ignore
 
@@ -367,6 +372,8 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
         for set_name, batch, global_batch_size in eval_loader:
             # To device
             batch = {k: v.cuda() for k, v in batch.items()}
+            width = batch["labels"].shape[1] // 3
+            batch["labels"][:, :2 * width] = IGNORE_LABEL_ID
             with torch.device("cuda"):
                 carry = train_state.model.initial_carry(batch)  # type: ignore
 
@@ -608,6 +615,8 @@ def launch(hydra_config: DictConfig):
             if RANK == 0 and current_epoch % 100 == 0:
                 example_set, example_batch, _ = next(iter(val_loader))
                 example_gpu = {k: v.cuda() for k, v in example_batch.items()}
+                width = example_gpu["labels"].shape[1] // 3
+                example_gpu["labels"][:, :2 * width] = IGNORE_LABEL_ID
                 with torch.inference_mode(), torch.device("cuda"):
                     sample_carry = train_state.model.initial_carry(example_gpu)  # type: ignore
                     while True:
