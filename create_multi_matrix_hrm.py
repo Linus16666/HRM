@@ -59,17 +59,27 @@ def build_batch(a: int, b: int, metadata: PuzzleDatasetMetadata, device: torch.d
 
 
 def hrm_predict(model: torch.nn.Module, metadata: PuzzleDatasetMetadata, a: int, b: int, device: torch.device) -> int:
+    """Predict ``a * b`` using an HRM model.
+
+    The model runs in inference mode with ACT halting.  The logits from the
+    final iteration are reshaped back into three rows matching the dataset
+    layout before extracting the digits of the product from the last row.
+    """
     batch, width = build_batch(a, b, metadata, device)
-    carry = model.initial_carry(batch)
-    while True:
-        carry, _, _, outputs, all_finish = model(return_keys=["logits"], carry=carry, batch=batch)
-        if all_finish:
-            break
+    with torch.inference_mode():
+        carry = model.initial_carry(batch)
+        while True:
+            carry, _, _, outputs, all_finish = model(
+                return_keys=["logits"], carry=carry, batch=batch
+            )
+            if bool(all_finish):
+                break
+
     preds = (
-        outputs["logits"].argmax(dim=-1).view(3, width).detach().cpu().numpy() - 1
+        outputs["logits"].argmax(dim=-1).squeeze(0).view(3, width).cpu().numpy() - 1
     )
     digits = preds[2]
-    digits = digits[digits >= 0]
+    digits = digits[digits != -1]
     return int("".join(map(str, digits)) or "0")
 
 
