@@ -22,7 +22,6 @@ import matplotlib.pyplot as plt
 from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
 from utils.functions import load_model_class, get_model_source_path
 from models.sparse_embedding import CastedSparseEmbeddingSignSGD_Distributed
-from models.losses import IGNORE_LABEL_ID
 
 
 class LossConfig(pydantic.BaseModel):
@@ -36,7 +35,6 @@ class ArchConfig(pydantic.BaseModel):
 
     name: str
     loss: LossConfig
-    dropout: float = 0.0
 
 
 class PretrainConfig(pydantic.BaseModel):
@@ -72,10 +70,6 @@ class PretrainConfig(pydantic.BaseModel):
     eval_interval: Optional[int] = None
     eval_save_outputs: List[str] = []
 
-    # Curriculum learning
-    max_digits_schedule: List[int] = []
-    stage_epochs: Optional[int] = None
-
 
 @dataclass
 class TrainState:
@@ -88,7 +82,7 @@ class TrainState:
     total_steps: int
 
 
-def create_dataloader(config: PretrainConfig, split: str, rank: int, world_size: int, max_digits: Optional[int] = None, **kwargs):
+def create_dataloader(config: PretrainConfig, split: str, rank: int, world_size: int, **kwargs):
     dataset = PuzzleDataset(PuzzleDatasetConfig(
         seed=config.seed,
 
@@ -96,8 +90,7 @@ def create_dataloader(config: PretrainConfig, split: str, rank: int, world_size:
 
         rank=rank,
         num_replicas=world_size,
-        max_digits=max_digits,
-
+        
         **kwargs
     ), split=split)
     dataloader = DataLoader(
@@ -117,7 +110,6 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
     model_cfg = dict(
         **config.arch.__pydantic_extra__,  # type: ignore
 
-        dropout=config.arch.dropout,
         batch_size=config.global_batch_size // world_size,
 
         vocab_size=train_metadata.vocab_size,
@@ -180,7 +172,7 @@ def cosine_schedule_with_warmup_lr_lambda(
 
 def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, world_size: int):
     # Estimated total training steps
-    total_steps = int(config.stage_epochs * train_metadata.total_groups * train_metadata.mean_puzzle_examples / config.global_batch_size)
+    total_steps = int(config.epochs * train_metadata.total_groups * train_metadata.mean_puzzle_examples / config.global_batch_size)
 
     # Model
     model, optimizers, optimizer_lrs = create_model(config, train_metadata, world_size=world_size)
@@ -222,8 +214,6 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
 
     # To device
     batch = {k: v.cuda() for k, v in batch.items()}
-    width = batch["labels"].shape[1] // 3
-    batch["labels"][:, :2 * width] = IGNORE_LABEL_ID
 
     # Init carry if it is None
     if train_state.carry is None:
@@ -290,8 +280,6 @@ def validate(config: PretrainConfig, train_state: TrainState, val_loader: torch.
         for set_name, batch, global_batch_size in val_loader:
             # To device
             batch = {k: v.cuda() for k, v in batch.items()}
-            width = batch["labels"].shape[1] // 3
-            batch["labels"][:, :2 * width] = IGNORE_LABEL_ID
             with torch.device("cuda"):
                 carry = train_state.model.initial_carry(batch)  # type: ignore
 
@@ -372,8 +360,6 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
         for set_name, batch, global_batch_size in eval_loader:
             # To device
             batch = {k: v.cuda() for k, v in batch.items()}
-            width = batch["labels"].shape[1] // 3
-            batch["labels"][:, :2 * width] = IGNORE_LABEL_ID
             with torch.device("cuda"):
                 carry = train_state.model.initial_carry(batch)  # type: ignore
 
@@ -522,9 +508,6 @@ def load_synced_config(hydra_config: DictConfig, rank: int, world_size: int) -> 
     if rank == 0:
         config = PretrainConfig(**hydra_config)  # type: ignore
 
-        if config.stage_epochs is None:
-            config.stage_epochs = config.epochs
-
         # Naming
         if config.project_name is None:
             config.project_name = f"{os.path.basename(config.data_path).capitalize()} ACT-torch"
@@ -562,16 +545,17 @@ def launch(hydra_config: DictConfig):
     # Seed RNGs to ensure consistency
     torch.random.manual_seed(config.seed + RANK)
 
-    # Curriculum setup
-    curriculum = config.max_digits_schedule or [None]
-    stage_metadatas = []
-    for md in curriculum:
-        _, meta = create_dataloader(config, "train", test_set_mode=False, epochs_per_iter=1, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE, max_digits=md)
-        stage_metadatas.append(meta)
+    # Dataset
+    train_epochs_per_iter = config.eval_interval if config.eval_interval is not None else config.epochs
+    total_iters = config.epochs // train_epochs_per_iter
 
-    # Train state based on last stage metadata (assumed to have largest seq_len)
-    train_state = init_train_state(config, stage_metadatas[-1], world_size=WORLD_SIZE)
-    train_state.total_steps = sum(int(config.stage_epochs * m.total_groups * m.mean_puzzle_examples / config.global_batch_size) for m in stage_metadatas)
+    assert config.epochs % train_epochs_per_iter == 0, "Eval interval must be a divisor of total epochs."
+
+    train_loader, train_metadata = create_dataloader(config, "train", test_set_mode=False, epochs_per_iter=train_epochs_per_iter, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE)
+    val_loader,  val_metadata  = create_dataloader(config, "test", test_set_mode=True, epochs_per_iter=1, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE)
+
+    # Train state
+    train_state = init_train_state(config, train_metadata, world_size=WORLD_SIZE)
 
     # Progress bar and logger
     progress_bar = None
@@ -582,62 +566,47 @@ def launch(hydra_config: DictConfig):
         wandb.log({"num_params": sum(x.numel() for x in train_state.model.parameters())}, step=0)
         save_code_and_config(config)
 
-    # Training Loop across curriculum stages
-    completed_epochs = 0
-    for stage_idx, max_digits in enumerate(curriculum):
-        print(f"[Rank {RANK}, World Size {WORLD_SIZE}]: Curriculum stage {stage_idx + 1}/{len(curriculum)} max_digits={max_digits}")
-        train_epochs_per_iter = config.eval_interval if config.eval_interval is not None else config.stage_epochs
-        total_iters = config.stage_epochs // train_epochs_per_iter
-        assert config.stage_epochs % train_epochs_per_iter == 0, "Eval interval must be a divisor of stage epochs."
+    # Training Loop
+    for _iter_id in range(total_iters):
+        print (f"[Rank {RANK}, World Size {WORLD_SIZE}]: Epoch {_iter_id * train_epochs_per_iter}")
 
-        train_loader, _ = create_dataloader(config, "train", test_set_mode=False, epochs_per_iter=train_epochs_per_iter, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE, max_digits=max_digits)
-        val_loader,  val_metadata  = create_dataloader(config, "test", test_set_mode=True, epochs_per_iter=1, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE, max_digits=max_digits)
-
-        for _iter_id in range(total_iters):
-            current_epoch = completed_epochs + _iter_id * train_epochs_per_iter
-            print(f"[Rank {RANK}, World Size {WORLD_SIZE}]: Epoch {current_epoch}")
-
-            ############ Train Iter
-            train_state.model.train()
-            for set_name, batch, global_batch_size in train_loader:
-                metrics = train_batch(config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE)
-
-                if RANK == 0 and metrics is not None:
-                    wandb.log(metrics, step=train_state.step)
-                    progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
-
-            ############ Validation
-            train_state.model.eval()
-            metrics, last_hidden, last_tokens = validate(config, train_state, val_loader, val_metadata, rank=RANK, world_size=WORLD_SIZE)
+        ############ Train Iter
+        train_state.model.train()
+        for set_name, batch, global_batch_size in train_loader:
+            metrics = train_batch(config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE)
 
             if RANK == 0 and metrics is not None:
                 wandb.log(metrics, step=train_state.step)
-                if stage_idx == len(curriculum) - 1 and _iter_id == total_iters - 1:
-                    log_hidden_state_pca(last_hidden, last_tokens, train_state.step)
+                progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
 
-            if RANK == 0 and current_epoch % 100 == 0:
-                example_set, example_batch, _ = next(iter(val_loader))
-                example_gpu = {k: v.cuda() for k, v in example_batch.items()}
-                width = example_gpu["labels"].shape[1] // 3
-                example_gpu["labels"][:, :2 * width] = IGNORE_LABEL_ID
-                with torch.inference_mode(), torch.device("cuda"):
-                    sample_carry = train_state.model.initial_carry(example_gpu)  # type: ignore
-                    while True:
-                        sample_carry, _, _, sample_preds, all_finish = train_state.model(
-                            carry=sample_carry, batch=example_gpu, return_keys=["logits"])
-                        if all_finish:
-                            break
-                pred_tokens = sample_preds["logits"].argmax(dim=-1).cpu()
-                width = example_batch["labels"].shape[1] // 3
-                print("Input:\n" + decode_tokens(example_batch["inputs"][0]))
-                print("Correct output:\n" + decode_tokens(example_batch["labels"][0][2 * width:]))
-                print("Model output:\n" + decode_tokens(pred_tokens[0][2 * width:]))
+        ############ Validation
+        train_state.model.eval()
+        metrics, last_hidden, last_tokens = validate(config, train_state, val_loader, val_metadata, rank=RANK, world_size=WORLD_SIZE)
 
-            ############ Checkpointing
-            if RANK == 0 and (config.checkpoint_every_eval or (stage_idx == len(curriculum) - 1 and _iter_id == total_iters - 1)):
-                save_train_state(config, train_state)
+        if RANK == 0 and metrics is not None:
+            wandb.log(metrics, step=train_state.step)
+            if _iter_id == total_iters - 1:
+                log_hidden_state_pca(last_hidden, last_tokens, train_state.step)
 
-        completed_epochs += config.stage_epochs
+        current_epoch = _iter_id * train_epochs_per_iter
+        if RANK == 0 and current_epoch % 100 == 0:
+            example_set, example_batch, _ = next(iter(val_loader))
+            example_gpu = {k: v.cuda() for k, v in example_batch.items()}
+            with torch.inference_mode(), torch.device("cuda"):
+                sample_carry = train_state.model.initial_carry(example_gpu)  # type: ignore
+                while True:
+                    sample_carry, _, _, sample_preds, all_finish = train_state.model(
+                        carry=sample_carry, batch=example_gpu, return_keys=["logits"])
+                    if all_finish:
+                        break
+            pred_tokens = sample_preds["logits"].argmax(dim=-1).cpu()
+            print("Input:\n" + decode_tokens(example_batch["inputs"][0]))
+            print("Correct output:\n" + decode_tokens(example_batch["labels"][0]))
+            print("Model output:\n" + decode_tokens(pred_tokens[0]))
+            
+        ############ Checkpointing
+        if RANK == 0 and (config.checkpoint_every_eval or (_iter_id == total_iters - 1)):
+            save_train_state(config, train_state)
 
     # finalize
     if dist.is_initialized():
