@@ -625,9 +625,10 @@ def launch(hydra_config: DictConfig):
                         if all_finish:
                             break
                 pred_tokens = sample_preds["logits"].argmax(dim=-1).cpu()
+                width = example_batch["labels"].shape[1] // 3
                 print("Input:\n" + decode_tokens(example_batch["inputs"][0]))
-                print("Correct output:\n" + decode_tokens(example_batch["labels"][0]))
-                print("Model output:\n" + decode_tokens(pred_tokens[0]))
+                print("Correct output:\n" + decode_tokens(example_batch["labels"][0][2 * width:]))
+                print("Model output:\n" + decode_tokens(pred_tokens[0][2 * width:]))
 
             ############ Checkpointing
             if RANK == 0 and (config.checkpoint_every_eval or (stage_idx == len(curriculum) - 1 and _iter_id == total_iters - 1)):
