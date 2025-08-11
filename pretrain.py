@@ -35,6 +35,7 @@ class ArchConfig(pydantic.BaseModel):
 
     name: str
     loss: LossConfig
+    dropout: float = 0.0
 
 
 class PretrainConfig(pydantic.BaseModel):
@@ -115,6 +116,7 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
     model_cfg = dict(
         **config.arch.__pydantic_extra__,  # type: ignore
 
+        dropout=config.arch.dropout,
         batch_size=config.global_batch_size // world_size,
 
         vocab_size=train_metadata.vocab_size,

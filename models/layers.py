@@ -101,7 +101,7 @@ class RotaryEmbedding(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, hidden_size, head_dim, num_heads, num_key_value_heads, causal=False):
+    def __init__(self, hidden_size, head_dim, num_heads, num_key_value_heads, causal=False, dropout: float = 0.0):
         super().__init__()
 
         self.hidden_size = hidden_size
@@ -113,6 +113,7 @@ class Attention(nn.Module):
 
         self.qkv_proj = CastedLinear(self.hidden_size, (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim, bias=False)
         self.o_proj = CastedLinear(self.output_size, self.hidden_size, bias=False)
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, cos_sin: CosSin, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
@@ -138,20 +139,23 @@ class Attention(nn.Module):
 
         # attn_output: [batch_size, num_heads, seq_len, head_dim]
         attn_output = attn_output.view(batch_size, seq_len, self.output_size)  # type: ignore
-        return self.o_proj(attn_output)
+        attn_output = self.o_proj(attn_output)
+        return self.dropout(attn_output)
 
 
 class SwiGLU(nn.Module):
-    def __init__(self, hidden_size: int, expansion: float):
+    def __init__(self, hidden_size: int, expansion: float, dropout: float = 0.0):
         super().__init__()
         inter = _find_multiple(round(expansion * hidden_size * 2 / 3), 256)
 
         self.gate_up_proj = CastedLinear(hidden_size, inter * 2, bias=False)
         self.down_proj    = CastedLinear(inter, hidden_size, bias=False)
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, x):
         gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
-        return self.down_proj(F.silu(gate) * up)
+        x = self.down_proj(F.silu(gate) * up)
+        return self.dropout(x)
 
 
 def rms_norm(hidden_states: torch.Tensor, variance_epsilon: float) -> torch.Tensor:
