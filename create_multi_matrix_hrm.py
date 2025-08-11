@@ -79,7 +79,16 @@ def hrm_predict(model: torch.nn.Module, metadata: PuzzleDatasetMetadata, a: int,
         outputs["logits"].argmax(dim=-1).squeeze(0).view(3, width).cpu().numpy() - 1
     )
     digits = preds[2]
-    digits = digits[digits != -1]
+    # Extract contiguous digits from the rightmost non-PAD region to form the product
+    idx = width - 1
+    while idx >= 0 and digits[idx] == -1:
+        idx -= 1
+    if idx < 0:
+        return 0
+    start = idx
+    while start >= 0 and digits[start] != -1:
+        start -= 1
+    digits = digits[start + 1 : idx + 1]
     return int("".join(map(str, digits)) or "0")
 
 
