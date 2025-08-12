@@ -66,9 +66,6 @@ class PretrainConfig(pydantic.BaseModel):
     run_name: Optional[str] = None
     checkpoint_path: Optional[str] = None
 
-    # Optional path to load a pretrained model before training
-    pretrained_path: Optional[str] = None
-
     # Extras
     seed: int = 0
     checkpoint_every_eval: bool = False
@@ -136,14 +133,6 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
     with torch.device("cuda"):
         model: nn.Module = model_cls(model_cfg)
         model = loss_head_cls(model, **config.arch.loss.__pydantic_extra__)  # type: ignore
-
-        # Optionally initialize from a pretrained checkpoint
-        if config.pretrained_path is not None:
-            state = torch.load(config.pretrained_path, map_location="cpu")
-            missing, unexpected = model.load_state_dict(state, strict=False)
-            if missing or unexpected:
-                print(f"Warning: missing keys {missing}, unexpected keys {unexpected} when loading pretrained state")
-
         if "DISABLE_COMPILE" not in os.environ:
             model = torch.compile(model, dynamic=False)  # type: ignore
 
