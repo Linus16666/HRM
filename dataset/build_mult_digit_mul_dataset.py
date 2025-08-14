@@ -1,4 +1,11 @@
-"""Utility to generate a multiplication dataset for HRM."""
+"""Utility to generate a multiplication dataset for HRM.
+
+The default dataset expects the model to output only the final product.  When
+``include_steps`` is ``True`` the label sequence contains the intermediate
+"hand-written" multiplication steps.  For example ``32 x 54`` yields the
+sequence ``0618211728`` (partial products ``160`` and ``128`` written in
+reverse order followed by the final result ``1728``).
+"""
 
 import os
 import json
@@ -18,6 +25,7 @@ class DataProcessConfig(BaseModel):
     num_test: int = 2500
     max_digits: int = 20
     print_samples: int = 3
+    include_steps: bool = False
 
 
 def number_to_row(number: int, width: int) -> np.ndarray:
@@ -37,7 +45,10 @@ def generate_dataset(split: str, num_examples: int, cfg: DataProcessConfig):
     """Generate one split of the dataset."""
 
     rng = np.random.default_rng()
-    width = cfg.max_digits * 2
+    if cfg.include_steps:
+        width = cfg.max_digits * (cfg.max_digits + 1) + cfg.max_digits * 2
+    else:
+        width = cfg.max_digits * 2
 
     # Storage for all examples in this split
     results = {k: [] for k in ["inputs", "labels", "puzzle_identifiers", "puzzle_indices", "group_indices", "max_digits"]}
@@ -74,9 +85,29 @@ def generate_dataset(split: str, num_examples: int, cfg: DataProcessConfig):
         # Convert numbers to fixed-width digit rows
         row_a = number_to_row(a, width)
         row_b = number_to_row(b, width)
-        row_c = number_to_row(product, width)
 
-        # Third row is blank in the input and filled with the product in labels
+        if cfg.include_steps:
+            # Build step-by-step output: reversed partial products followed by final product
+            step_digits = []
+            a_str = str(a)
+            b_str = str(b)
+            n = len(a_str)
+            m = len(b_str)
+            for d in b_str:
+                partial = int(d) * a
+                part_str = str(partial).rjust(n + 1, "0")
+                step_digits.extend(reversed(part_str))
+            final_str = str(product).rjust(n + m, "0")
+            step_digits.extend(final_str)
+
+            step_row = np.full(width, -1, dtype=np.int8)
+            digits_arr = np.frombuffer("".join(step_digits).encode(), dtype=np.uint8) - ord("0")
+            step_row[width - len(digits_arr):] = digits_arr
+            row_c = step_row
+        else:
+            row_c = number_to_row(product, width)
+
+        # Third row is blank in the input and filled with the target in labels
         inp = np.vstack([row_a, row_b, np.full_like(row_c, -1)])
         out = np.vstack([row_a, row_b, row_c])
 
