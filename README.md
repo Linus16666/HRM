@@ -106,7 +106,10 @@ python dataset/build_sudoku_dataset.py --output-dir data/sudoku-extreme-1k-aug-1
 # Maze
 python dataset/build_maze_dataset.py  # 1000 examples
 # Multiplication
-python dataset/build_mult_digit_mul_dataset.py  # Random multi-digit multiplication. Prints a few sample puzzles
+# Random multi-digit multiplication. Prints a few sample puzzles
+python dataset/build_mult_digit_mul_dataset.py
+# Include step-by-step outputs (partial products + final result)
+python dataset/build_mult_digit_mul_dataset.py preprocess-data include_steps=true --output-dir data/mult-digit-mul-steps
 ```
 
 Each dataset folder contains a `dataset.json` describing the dataset in
@@ -161,6 +164,9 @@ Multiplication:
 
 ```bash
 OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 pretrain.py data_path=data/mult-digit-mul
+
+# Train on dataset with intermediate multiplication steps
+OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 pretrain.py data_path=data/mult-digit-mul-steps
 ```
 
 *Runtime:* varies with dataset size
