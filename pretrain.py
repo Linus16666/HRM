@@ -37,6 +37,7 @@ class ArchConfig(pydantic.BaseModel):
     name: str
     loss: LossConfig
     dropout: float = 0.0
+    causal: bool = False
 
 
 class PretrainConfig(pydantic.BaseModel):
@@ -123,7 +124,7 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
         vocab_size=train_metadata.vocab_size,
         seq_len=train_metadata.seq_len,
         num_puzzle_identifiers=train_metadata.num_puzzle_identifiers,
-        causal=False  # Non-autoregressive
+        causal=config.arch.causal
     )
 
     # Instantiate model with loss head

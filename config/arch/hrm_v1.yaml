@@ -20,3 +20,4 @@ puzzle_emb_ndim: ${.hidden_size}
 
 pos_encodings: rope
 dropout: 0.1
+causal: true
