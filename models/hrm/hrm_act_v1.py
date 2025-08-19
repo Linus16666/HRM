@@ -46,6 +46,7 @@ class HierarchicalReasoningModel_ACTV1Config(BaseModel):
     expansion: float
     num_heads: int
     pos_encodings: str
+    causal: bool = False
     dropout: float = 0.0
 
     rms_norm_eps: float = 1e-5
@@ -67,7 +68,7 @@ class HierarchicalReasoningModel_ACTV1Block(nn.Module):
             head_dim=config.hidden_size // config.num_heads,
             num_heads=config.num_heads,
             num_key_value_heads=config.num_heads,
-            causal=False,
+            causal=config.causal,
             dropout=config.dropout
         )
         self.mlp = SwiGLU(
