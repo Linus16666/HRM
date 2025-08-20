@@ -30,4 +30,4 @@ puzzle_emb_weight_decay: 0.1
 # Hyperparams - Puzzle embeddings training
 puzzle_emb_lr: 1e-2
 max_digits_schedule: [2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]  # digits per stage
-stage_epochs: 100
+stage_accuracy: 0.99  # accuracy threshold to move to next digit
