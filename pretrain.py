@@ -74,7 +74,7 @@ class PretrainConfig(pydantic.BaseModel):
 
     # Curriculum learning
     max_digits_schedule: List[int] = []
-    stage_epochs: Optional[int] = None
+    stage_accuracy: float = 1.0
 
 
 @dataclass
@@ -123,7 +123,7 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
         vocab_size=train_metadata.vocab_size,
         seq_len=train_metadata.seq_len,
         num_puzzle_identifiers=train_metadata.num_puzzle_identifiers,
-        causal=True  # Autoregressive
+        causal=False  # Non-autoregressive
     )
 
     # Instantiate model with loss head
@@ -180,7 +180,7 @@ def cosine_schedule_with_warmup_lr_lambda(
 
 def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, world_size: int):
     # Estimated total training steps
-    total_steps = int(config.stage_epochs * train_metadata.total_groups * train_metadata.mean_puzzle_examples / config.global_batch_size)
+    total_steps = int(config.epochs * train_metadata.total_groups * train_metadata.mean_puzzle_examples / config.global_batch_size)
 
     # Model
     model, optimizers, optimizer_lrs = create_model(config, train_metadata, world_size=world_size)
@@ -522,9 +522,6 @@ def load_synced_config(hydra_config: DictConfig, rank: int, world_size: int) -> 
     if rank == 0:
         config = PretrainConfig(**hydra_config)  # type: ignore
 
-        if config.stage_epochs is None:
-            config.stage_epochs = config.epochs
-
         # Naming
         if config.project_name is None:
             config.project_name = f"{os.path.basename(config.data_path).capitalize()} ACT-torch"
@@ -571,7 +568,9 @@ def launch(hydra_config: DictConfig):
 
     # Train state based on last stage metadata (assumed to have largest seq_len)
     train_state = init_train_state(config, stage_metadatas[-1], world_size=WORLD_SIZE)
-    train_state.total_steps = sum(int(config.stage_epochs * m.total_groups * m.mean_puzzle_examples / config.global_batch_size) for m in stage_metadatas)
+    train_state.total_steps = int(
+        config.epochs * stage_metadatas[-1].total_groups * stage_metadatas[-1].mean_puzzle_examples / config.global_batch_size
+    )
 
     # Progress bar and logger
     progress_bar = None
@@ -586,16 +585,13 @@ def launch(hydra_config: DictConfig):
     completed_epochs = 0
     for stage_idx, max_digits in enumerate(curriculum):
         print(f"[Rank {RANK}, World Size {WORLD_SIZE}]: Curriculum stage {stage_idx + 1}/{len(curriculum)} max_digits={max_digits}")
-        train_epochs_per_iter = config.eval_interval if config.eval_interval is not None else config.stage_epochs
-        total_iters = config.stage_epochs // train_epochs_per_iter
-        assert config.stage_epochs % train_epochs_per_iter == 0, "Eval interval must be a divisor of stage epochs."
+        train_epochs_per_iter = config.eval_interval if config.eval_interval is not None else 1
 
         train_loader, _ = create_dataloader(config, "train", test_set_mode=False, epochs_per_iter=train_epochs_per_iter, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE, max_digits=max_digits)
         val_loader,  val_metadata  = create_dataloader(config, "test", test_set_mode=True, epochs_per_iter=1, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE, max_digits=max_digits)
 
-        for _iter_id in range(total_iters):
-            current_epoch = completed_epochs + _iter_id * train_epochs_per_iter
-            print(f"[Rank {RANK}, World Size {WORLD_SIZE}]: Epoch {current_epoch}")
+        while True:
+            print(f"[Rank {RANK}, World Size {WORLD_SIZE}]: Epoch {completed_epochs}")
 
             ############ Train Iter
             train_state.model.train()
@@ -610,12 +606,23 @@ def launch(hydra_config: DictConfig):
             train_state.model.eval()
             metrics, last_hidden, last_tokens = validate(config, train_state, val_loader, val_metadata, rank=RANK, world_size=WORLD_SIZE)
 
+            stop_stage = False
             if RANK == 0 and metrics is not None:
                 wandb.log(metrics, step=train_state.step)
-                if stage_idx == len(curriculum) - 1 and _iter_id == total_iters - 1:
-                    log_hidden_state_pca(last_hidden, last_tokens, train_state.step)
+                # use metrics from first set
+                first_set = next(iter(metrics.values()))
+                if first_set.get("exact_accuracy", 0) >= config.stage_accuracy:
+                    stop_stage = True
+                    if stage_idx == len(curriculum) - 1:
+                        log_hidden_state_pca(last_hidden, last_tokens, train_state.step)
 
-            if RANK == 0 and current_epoch % 100 == 0:
+            completed_epochs += train_epochs_per_iter
+
+            flag = torch.tensor(int(stop_stage), device="cuda")
+            if WORLD_SIZE > 1:
+                dist.broadcast(flag, src=0)
+
+            if RANK == 0 and completed_epochs % 100 == 0:
                 example_set, example_batch, _ = next(iter(val_loader))
                 example_gpu = {k: v.cuda() for k, v in example_batch.items()}
                 width = example_gpu["labels"].shape[1] // 3
@@ -634,10 +641,14 @@ def launch(hydra_config: DictConfig):
                 print("Model output:\n" + decode_tokens(pred_tokens[0][2 * width:]))
 
             ############ Checkpointing
-            if RANK == 0 and (config.checkpoint_every_eval or (stage_idx == len(curriculum) - 1 and _iter_id == total_iters - 1)):
+            should_checkpoint = config.checkpoint_every_eval
+            if stage_idx == len(curriculum) - 1 and flag.item():
+                should_checkpoint = True
+            if RANK == 0 and should_checkpoint:
                 save_train_state(config, train_state)
 
-        completed_epochs += config.stage_epochs
+            if flag.item():
+                break
 
     # finalize
     if dist.is_initialized():
