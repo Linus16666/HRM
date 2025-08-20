@@ -305,7 +305,8 @@ def validate(config: PretrainConfig, train_state: TrainState, val_loader: torch.
                 carry, _, metrics, preds, all_finish = train_state.model(
                     carry=carry,
                     batch=batch,
-                    return_keys=config.eval_save_outputs + ["hidden_states_high", "hidden_states_low"],
+                    return_keys=config.eval_save_outputs
+                    + ["logits", "hidden_states_high", "hidden_states_low"],
                     return_hidden_states=True,
                 )
 
@@ -417,7 +418,11 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
 
             # Forward
             while True:
-                carry, _, metrics, preds, all_finish = train_state.model(carry=carry, batch=batch, return_keys=config.eval_save_outputs)
+                carry, _, metrics, preds, all_finish = train_state.model(
+                    carry=carry,
+                    batch=batch,
+                    return_keys=config.eval_save_outputs + ["logits"],
+                )
 
                 if all_finish:
                     break
