@@ -280,6 +280,11 @@ def validate(config: PretrainConfig, train_state: TrainState, val_loader: torch.
 
         all_preds = {}
 
+        # Track per-example correctness
+        total_sequences = 0
+        correct_sequences = 0
+        wrong_examples = []
+
         metric_keys = []
         metric_values = None
         metric_global_batch_size = [0 for _ in range(len(set_ids))]
@@ -306,6 +311,25 @@ def validate(config: PretrainConfig, train_state: TrainState, val_loader: torch.
 
                 if all_finish:
                     break
+
+            # Correctness statistics
+            pred_tokens = preds["logits"].argmax(dim=-1)
+            labels = batch["labels"]
+            mask = labels != IGNORE_LABEL_ID
+            loss_counts = mask.sum(-1)
+            is_correct = (pred_tokens == labels) & mask
+            seq_is_correct = is_correct.sum(-1) == loss_counts
+
+            total_sequences += labels.shape[0]
+            correct_sequences += seq_is_correct.sum().item()
+
+            wrong_indices = (~seq_is_correct).nonzero(as_tuple=False).squeeze(-1).tolist()
+            for idx in wrong_indices:
+                wrong_examples.append((
+                    batch["inputs"][idx].cpu(),
+                    labels[idx].cpu(),
+                    pred_tokens[idx].cpu(),
+                ))
 
             last_hidden = (
                 preds["hidden_states_high"].cpu(),
@@ -353,6 +377,15 @@ def validate(config: PretrainConfig, train_state: TrainState, val_loader: torch.
                     count = metrics.pop("count")
                     reduced_metrics[set_name] = {k: v / count for k, v in metrics.items()}
 
+                # Print correctness information
+                print(f"Validation correct: {correct_sequences}/{total_sequences}")
+                for i, (inp, lbl, pred) in enumerate(wrong_examples):
+                    width = lbl.shape[0] // 3
+                    print(f"Wrong example {i + 1}:")
+                    print("Input:\n" + decode_tokens(inp))
+                    print("Correct output:\n" + decode_tokens(lbl[2 * width:]))
+                    print("Model output:\n" + decode_tokens(pred[2 * width:]))
+
                 return reduced_metrics, last_hidden, last_tokens
 
         return None, last_hidden, last_tokens
@@ -363,6 +396,11 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
         set_ids = {k: idx for idx, k in enumerate(eval_metadata.sets)}
 
         all_preds = {}
+
+        # Track per-example correctness
+        total_sequences = 0
+        correct_sequences = 0
+        wrong_examples = []
 
         metric_keys = []
         metric_values = None
@@ -383,6 +421,25 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
 
                 if all_finish:
                     break
+
+            # Correctness statistics
+            pred_tokens = preds["logits"].argmax(dim=-1)
+            labels = batch["labels"]
+            mask = labels != IGNORE_LABEL_ID
+            loss_counts = mask.sum(-1)
+            is_correct = (pred_tokens == labels) & mask
+            seq_is_correct = is_correct.sum(-1) == loss_counts
+
+            total_sequences += labels.shape[0]
+            correct_sequences += seq_is_correct.sum().item()
+
+            wrong_indices = (~seq_is_correct).nonzero(as_tuple=False).squeeze(-1).tolist()
+            for idx in wrong_indices:
+                wrong_examples.append((
+                    batch["inputs"][idx].cpu(),
+                    labels[idx].cpu(),
+                    pred_tokens[idx].cpu(),
+                ))
 
             for collection in (batch, preds):
                 for k, v in collection.items():
@@ -423,6 +480,15 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
                 for set_name, metrics in reduced_metrics.items():
                     count = metrics.pop("count")
                     reduced_metrics[set_name] = {k: v / count for k, v in metrics.items()}
+
+                # Print correctness information
+                print(f"Evaluation correct: {correct_sequences}/{total_sequences}")
+                for i, (inp, lbl, pred) in enumerate(wrong_examples):
+                    width = lbl.shape[0] // 3
+                    print(f"Wrong example {i + 1}:")
+                    print("Input:\n" + decode_tokens(inp))
+                    print("Correct output:\n" + decode_tokens(lbl[2 * width:]))
+                    print("Model output:\n" + decode_tokens(pred[2 * width:]))
 
                 return reduced_metrics
 
